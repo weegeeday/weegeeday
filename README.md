@@ -1,4 +1,4 @@
 ## Hi!
-Im Weegeeday.
-Full-Stack (But not really) python dev.
+Im Weegeeday. <br />
+Full-Stack (But not really) python dev. <br />
 I do random things sometimes.
