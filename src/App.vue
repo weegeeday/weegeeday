@@ -41,6 +41,7 @@ const sessionSavingEnabled = ref(true)
 const autosaveStatus = ref('Autosave: On')
 const pendingSavedState = ref(null)
 const saveImportInput = ref(null)
+const activeConfirmPrompt = ref(null)
 
 let popupTimerId = null
 let animationFrameId = null
@@ -345,8 +346,21 @@ const applyChickenCap = () => {
 }
 
 const toggleUnlimitedCap = () => {
-  if (!isUnlimitedCap.value) {
-    applyChickenCap()
+  const desiredValue = isUnlimitedCap.value
+
+  activeConfirmPrompt.value = {
+    title: 'Unlimited cap',
+    message: 'Are you sure you want to toggle unlimited cap? This can cause lag or crash your browser.',
+    confirmLabel: 'Yes, toggle it',
+    cancelLabel: 'Cancel',
+    onConfirm: () => {
+      if (!desiredValue) {
+        applyChickenCap()
+      }
+    },
+    onCancel: () => {
+      isUnlimitedCap.value = !desiredValue
+    },
   }
 }
 
@@ -391,8 +405,17 @@ const removeSavedProgress = () => {
   }
 }
 
-const confirmDeleteSave = () => {
-  return window.confirm('Delete saved progress from this device?')
+const openDeleteSavePrompt = () => {
+  activeConfirmPrompt.value = {
+    title: 'Delete save',
+    message: 'Delete saved progress from this device?',
+    confirmLabel: 'Delete save',
+    cancelLabel: 'Cancel',
+    onConfirm: () => {
+      removeSavedProgress()
+      autosaveStatus.value = sessionSavingEnabled.value ? 'Autosave: On' : 'Autosave: Off (session)'
+    },
+  }
 }
 
 const openRepository = () => {
@@ -455,12 +478,7 @@ const handleSaveImportSelection = async (event) => {
 }
 
 const confirmAndDeleteSave = () => {
-  if (!confirmDeleteSave()) {
-    return
-  }
-
-  removeSavedProgress()
-  autosaveStatus.value = sessionSavingEnabled.value ? 'Autosave: On' : 'Autosave: Off (session)'
+  openDeleteSavePrompt()
 }
 
 const applySavedProgress = (savedState) => {
@@ -497,10 +515,6 @@ const handleLoadSavedProgress = () => {
 }
 
 const handleDeleteSavedProgress = () => {
-  if (!confirmDeleteSave()) {
-    return
-  }
-
   removeSavedProgress()
   sessionSavingEnabled.value = true
   autosaveStatus.value = 'Autosave: On'
@@ -513,6 +527,30 @@ const handleKeepWithoutLoad = () => {
   autosaveStatus.value = 'Autosave: Off (session)'
   showSavePrompt.value = false
   pendingSavedState.value = null
+}
+
+const closeConfirmPrompt = () => {
+  activeConfirmPrompt.value = null
+}
+
+const confirmActivePrompt = () => {
+  const prompt = activeConfirmPrompt.value
+  if (!prompt) {
+    return
+  }
+
+  closeConfirmPrompt()
+  prompt.onConfirm?.()
+}
+
+const cancelActivePrompt = () => {
+  const prompt = activeConfirmPrompt.value
+  if (!prompt) {
+    return
+  }
+
+  closeConfirmPrompt()
+  prompt.onCancel?.()
 }
 
 const findChickenById = (id) => {
@@ -765,6 +803,10 @@ const animateChickens = (timestamp) => {
       if (lowFpsDurationMs >= 2000 && chickens.value.length >= 8) {
         areCollisionsEnabled.value = false
         isPerformanceMode.value = true
+        if (isUnlimitedCap.value) {
+          isUnlimitedCap.value = false
+          syncRenderedChickens()
+        }
         stableFpsDurationMs = 0
       }
     } else {
@@ -1002,6 +1044,7 @@ watch(totalChickenCount, () => {
         <input
           v-model="isUnlimitedCap"
           type="checkbox"
+          :disabled="isPerformanceMode"
           @change="toggleUnlimitedCap"
         >
         Unlimited cap
@@ -1039,6 +1082,21 @@ watch(totalChickenCount, () => {
         <button type="button" class="save-button" @click="handleKeepWithoutLoad">
           Keep save, do not load (disable saving this session)
         </button>
+      </div>
+    </div>
+
+    <div v-if="activeConfirmPrompt" class="save-overlay">
+      <div class="save-dialog">
+        <div class="save-title">{{ activeConfirmPrompt.title }}</div>
+        <div class="save-text">{{ activeConfirmPrompt.message }}</div>
+        <div class="prompt-actions">
+          <button type="button" class="save-button" @click="confirmActivePrompt">
+            {{ activeConfirmPrompt.confirmLabel || 'Confirm' }}
+          </button>
+          <button type="button" class="save-button" @click="cancelActivePrompt">
+            {{ activeConfirmPrompt.cancelLabel || 'Cancel' }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -1320,6 +1378,15 @@ watch(totalChickenCount, () => {
   text-align: left;
   cursor: pointer;
   font-size: 0.82rem;
+}
+
+.prompt-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.prompt-actions .save-button {
+  flex: 1;
 }
 
 .chicken {
