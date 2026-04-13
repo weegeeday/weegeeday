@@ -9,7 +9,6 @@ const chickenImageModules = import.meta.glob('./assets/chicken/**/*.{png,jpg,jpe
   import: 'default',
 })
 
-const popupIntervalMs = 5000
 const linearFrictionPerSecond = 0.08
 const angularFrictionPerSecond = 0.55
 const saveStorageKey = 'barbequeChickenAlert.save.v1'
@@ -31,9 +30,11 @@ const isAutoClickerEnabled = ref(true)
 const rebirthCount = ref(0)
 const hasChickenBreastUnlock = ref(false)
 const popupSpeedUpgradeLevel = ref(0)
+const cookCount = ref(0)
 const isUnlimitedCap = ref(false)
 const chickenCap = ref(300)
 const fpsCounter = ref(0)
+const averageCps = ref(0)
 const totalChickenCount = ref(0)
 const showSavePrompt = ref(false)
 const sessionSavingEnabled = ref(true)
@@ -47,11 +48,22 @@ let previousTimestamp = 0
 let chickenIdSeed = 0
 let activeDragId = null
 let lowFpsDurationMs = 0
+let stableFpsDurationMs = 0
 let smoothedFps = 60
+let cookProductionCarry = 0
+let totalChickenEarned = 0
+let sessionStartTimestamp = performance.now()
 
 const popupAudio = new Audio(soundFile)
 const chickenAudio = new Audio(sound2File)
-const chickenImages = Object.values(chickenImageModules)
+const chickenImageEntries = Object.entries(chickenImageModules)
+const wingChickenImages = chickenImageEntries
+  .filter(([path]) => path.toLowerCase().includes('/wings/'))
+  .map(([, src]) => src)
+const chickenBreastImages = chickenImageEntries
+  .filter(([path]) => path.toLowerCase().includes('/full/'))
+  .map(([, src]) => src)
+const chickenImages = [...wingChickenImages, ...chickenBreastImages]
 
 popupAudio.preload = 'auto'
 chickenAudio.preload = 'auto'
@@ -71,19 +83,26 @@ const nextUpgradeCost = computed(() => getUpgradeCost(upgradeLevel.value))
 const canAffordUpgrade = computed(() => chickenCount.value >= nextUpgradeCost.value)
 const autoPopupClickUpgradeCost = 1000
 const chickenBreastUnlockCost = 200
+const cookBaseCost = 125
 const getPopupSpeedUpgradeCost = (level) => {
-  const baseLevel = (level + 1) * 5
-  return getUpgradeCost(baseLevel)
+  return Math.max(cookBaseCost, getUpgradeCost(level))
 }
-const rebirthMultiplier = computed(() => 1 + 0.1 * rebirthCount.value)
+const getCookCost = (level) => {
+  return Math.max(cookBaseCost, getUpgradeCost(level))
+}
+const rebirthMultiplier = computed(() => 1 + 0.5 * rebirthCount.value)
 const canAffordChickenBreastUnlock = computed(() => {
   return !hasChickenBreastUnlock.value && chickenCount.value >= chickenBreastUnlockCost
 })
-const nextPopupSpeedCost = computed(() => getPopupSpeedUpgradeCost(popupSpeedUpgradeLevel.value))
+const nextPopupSpeedCost = computed(() => getPopupSpeedUpgradeCost(upgradeLevel.value))
 const canAffordPopupSpeedUpgrade = computed(() => chickenCount.value >= nextPopupSpeedCost.value)
+const nextCookCost = computed(() => getCookCost(upgradeLevel.value))
+const canAffordCook = computed(() => chickenCount.value >= nextCookCost.value)
+const cookOutputPerSecond = computed(() => cookCount.value * (1 + rebirthCount.value))
 const currentPopupIntervalMs = computed(() => {
   return Math.max(1000, 5000 - popupSpeedUpgradeLevel.value * 50)
 })
+const isPopupSpeedFullyUpgraded = computed(() => currentPopupIntervalMs.value <= 1000)
 const getRebirthLevelRequirement = () => {
   return 45 + rebirthCount.value * 10
 }
@@ -182,7 +201,9 @@ const createChicken = () => {
   const maxX = Math.max(0, viewportWidth.value - size)
   const maxY = Math.max(0, viewportHeight.value - size)
 
-  const validImages = hasChickenBreastUnlock.value ? chickenImages : chickenImages.filter(img => !img.includes('/Full/'))
+  const validImages = hasChickenBreastUnlock.value
+    ? chickenImages
+    : (wingChickenImages.length > 0 ? wingChickenImages : chickenImages)
 
   return {
     id: ++chickenIdSeed,
@@ -219,14 +240,23 @@ const syncRenderedChickens = () => {
   }
 }
 
+const addChicken = (amount) => {
+  if (amount <= 0) {
+    return
+  }
+
+  totalChickenCount.value += amount
+  totalChickenEarned += amount
+  syncRenderedChickens()
+}
+
 const handlePopupClick = () => {
   void playChickenAudio()
 
   const requested = chickensPerPopup.value
 
   if (requested > 0) {
-    totalChickenCount.value += requested
-    syncRenderedChickens()
+    addChicken(requested)
   }
 
   isPopupVisible.value = false
@@ -235,7 +265,7 @@ const handlePopupClick = () => {
     window.clearTimeout(popupTimerId)
   }
 
-  popupTimerId = window.setTimeout(spawnPopup, popupIntervalMs)
+  popupTimerId = window.setTimeout(spawnPopup, currentPopupIntervalMs.value)
 }
 
 const toggleMenu = () => {
@@ -298,6 +328,16 @@ const upgradePopupSpeed = () => {
   syncRenderedChickens()
 }
 
+const hireCook = () => {
+  if (!canAffordCook.value) {
+    return
+  }
+
+  totalChickenCount.value -= nextCookCost.value
+  cookCount.value += 1
+  syncRenderedChickens()
+}
+
 const applyChickenCap = () => {
   chickenCap.value = normalizeCapValue(chickenCap.value)
   enforceChickenCap()
@@ -323,6 +363,7 @@ const createSavePayload = () => {
     rebirthCount: rebirthCount.value,
     hasChickenBreastUnlock: hasChickenBreastUnlock.value,
     popupSpeedUpgradeLevel: popupSpeedUpgradeLevel.value,
+    cookCount: cookCount.value,
     chickenCap: chickenCap.value,
     areCollisionsEnabled: areCollisionsEnabled.value,
     isPerformanceMode: isPerformanceMode.value,
@@ -434,6 +475,7 @@ const applySavedProgress = (savedState) => {
   rebirthCount.value = normalizePositiveInteger(savedState.rebirthCount, 0, 0)
   hasChickenBreastUnlock.value = Boolean(savedState.hasChickenBreastUnlock)
   popupSpeedUpgradeLevel.value = normalizePositiveInteger(savedState.popupSpeedUpgradeLevel, 0, 0)
+  cookCount.value = normalizePositiveInteger(savedState.cookCount, 0, 0)
   chickenCap.value = normalizeCapValue(savedState.chickenCap)
   areCollisionsEnabled.value = savedState.areCollisionsEnabled !== false
   isPerformanceMode.value = Boolean(savedState.isPerformanceMode)
@@ -590,6 +632,18 @@ const handleChickenClick = async (chicken) => {
   await playChickenAudio()
 }
 
+const shakeChickens = () => {
+  chickens.value.forEach((chicken) => {
+    if (chicken.isDragging) {
+      return
+    }
+
+    chicken.velocityX = randomBetween(-420, 420)
+    chicken.velocityY = randomBetween(-420, 420)
+    chicken.angularVelocity = randomBetween(-600, 600)
+  })
+}
+
 const resolveChickenCollisions = () => {
   const chickenList = chickens.value
 
@@ -680,19 +734,51 @@ const animateChickens = (timestamp) => {
 
   smoothedFps = smoothedFps * 0.9 + instantaneousFps * 0.1
   fpsCounter.value = Math.round(smoothedFps)
+
+  const cookRate = cookOutputPerSecond.value
+  if (cookRate > 0) {
+    const produced = cookRate * deltaSeconds + cookProductionCarry
+    const producedWhole = Math.floor(produced)
+    cookProductionCarry = produced - producedWhole
+
+    if (producedWhole > 0) {
+      addChicken(producedWhole)
+    }
+  }
+
+  const elapsedSeconds = Math.max(1, (timestamp - sessionStartTimestamp) / 1000)
+  averageCps.value = totalChickenEarned / elapsedSeconds
+
   const linearDamping = Math.exp(-linearFrictionPerSecond * deltaSeconds)
   const angularDamping = Math.exp(-angularFrictionPerSecond * deltaSeconds)
 
-  if (!document.hidden && areCollisionsEnabled.value) {
-    if (instantaneousFps < 26) {
-      lowFpsDurationMs += frameMs
-    } else {
-      lowFpsDurationMs = Math.max(0, lowFpsDurationMs - frameMs)
-    }
+  if (!document.hidden) {
+    if (areCollisionsEnabled.value) {
+      stableFpsDurationMs = 0
 
-    if (lowFpsDurationMs >= 2000 && chickens.value.length >= 8) {
-      areCollisionsEnabled.value = false
-      isPerformanceMode.value = true
+      if (instantaneousFps < 26) {
+        lowFpsDurationMs += frameMs
+      } else {
+        lowFpsDurationMs = Math.max(0, lowFpsDurationMs - frameMs)
+      }
+
+      if (lowFpsDurationMs >= 2000 && chickens.value.length >= 8) {
+        areCollisionsEnabled.value = false
+        isPerformanceMode.value = true
+        stableFpsDurationMs = 0
+      }
+    } else {
+      if (smoothedFps >= 40) {
+        stableFpsDurationMs += frameMs
+      } else {
+        stableFpsDurationMs = Math.max(0, stableFpsDurationMs - frameMs * 2)
+      }
+
+      if (stableFpsDurationMs >= 30000) {
+        isPerformanceMode.value = false
+        lowFpsDurationMs = 0
+        stableFpsDurationMs = 0
+      }
     }
   }
 
@@ -749,6 +835,9 @@ const animateChickens = (timestamp) => {
 onMounted(() => {
   document.title = 'Barbeque Chicken Alert'
   updateViewport()
+  sessionStartTimestamp = performance.now()
+  totalChickenEarned = 0
+  cookProductionCarry = 0
   syncRenderedChickens()
 
   try {
@@ -806,6 +895,7 @@ watch(
     rebirthCount,
     hasChickenBreastUnlock,
     popupSpeedUpgradeLevel,
+    cookCount,
     chickenCap,
     areCollisionsEnabled,
     isPerformanceMode,
@@ -822,10 +912,11 @@ watch(totalChickenCount, () => {
 
 <template>
   <div class="black-screen">
-    <div class="fps-hud">FPS: {{ fpsCounter }}</div>
+    <div class="fps-hud">FPS: {{ fpsCounter }} | Avg CPS: {{ averageCps.toFixed(1) }}</div>
 
     <div class="hud">
       <button class="menu-button" type="button" aria-label="Open menu" @click="toggleMenu">☰</button>
+      <button class="shake-button" type="button" @click="shakeChickens">Shake</button>
       <div class="counter">Chicken: {{ chickenCount }}</div>
     </div>
 
@@ -844,6 +935,7 @@ watch(totalChickenCount, () => {
       </button>
 
       <button
+        v-if="!hasAutoPopupClickUpgrade"
         type="button"
         class="upgrade-button"
         :disabled="!canAffordAutoPopupClickUpgrade"
@@ -861,11 +953,12 @@ watch(totalChickenCount, () => {
           :disabled="!canAffordRebirth"
           @click="rebirth"
         >
-          Rebirth at Level {{ nextRebirthLevelRequirement }} (+0.1× gain)
+          Rebirth at Level {{ nextRebirthLevelRequirement }} (+0.5× gain)
         </button>
       </div>
 
       <button
+        v-if="!hasChickenBreastUnlock"
         type="button"
         class="upgrade-button"
         :disabled="!canAffordChickenBreastUnlock"
@@ -875,6 +968,16 @@ watch(totalChickenCount, () => {
       </button>
 
       <button
+        type="button"
+        class="upgrade-button"
+        :disabled="!canAffordCook"
+        @click="hireCook"
+      >
+        Hire Cook ({{ cookCount }}) — {{ cookOutputPerSecond.toFixed(1) }} CPS — Cost: {{ nextCookCost }}
+      </button>
+
+      <button
+        v-if="!isPopupSpeedFullyUpgraded"
         type="button"
         class="upgrade-button"
         :disabled="!canAffordPopupSpeedUpgrade"
@@ -1019,6 +1122,7 @@ watch(totalChickenCount, () => {
 }
 
 .menu-button,
+.shake-button,
 .counter {
   border: 1px solid #2c2c2c;
   background: rgba(15, 15, 15, 0.92);
@@ -1028,7 +1132,8 @@ watch(totalChickenCount, () => {
   font-size: 0.9rem;
 }
 
-.menu-button {
+.menu-button,
+.shake-button {
   cursor: pointer;
 }
 
