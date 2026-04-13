@@ -4,7 +4,7 @@ import popupImage from './assets/BCA.svg'
 import soundFile from './assets/sound.mp3'
 import sound2File from './assets/sound2.mp3'
 
-const chickenImageModules = import.meta.glob('./assets/chicken/*.{png,jpg,jpeg,webp,avif,gif}', {
+const chickenImageModules = import.meta.glob('./assets/chicken/**/*.{png,jpg,jpeg,webp,avif,gif}', {
   eager: true,
   import: 'default',
 })
@@ -25,12 +25,14 @@ const areCollisionsEnabled = ref(true)
 const isPerformanceMode = ref(false)
 const isMenuOpen = ref(false)
 const chickensPerPopup = ref(1)
-const upgradeLevel = ref(0)
+const upgradeLevel = ref(1)
 const hasAutoPopupClickUpgrade = ref(false)
 const isAutoClickerEnabled = ref(true)
 const rebirthCount = ref(0)
-const chickenCap = ref(300)
+const hasChickenBreastUnlock = ref(false)
+const popupSpeedUpgradeLevel = ref(0)
 const isUnlimitedCap = ref(false)
+const chickenCap = ref(300)
 const fpsCounter = ref(0)
 const totalChickenCount = ref(0)
 const showSavePrompt = ref(false)
@@ -55,8 +57,8 @@ popupAudio.preload = 'auto'
 chickenAudio.preload = 'auto'
 
 const getUpgradeGain = (level) => {
-  const baseGain = Math.max(1, Math.floor((level ** 2.5) / 3 + 1 + 1e-9))
-  return Math.max(1, Math.floor(baseGain * rebirthMultiplier.value + 1e-9))
+  const baseCpp = Math.floor((level ** 2.5) / 3 + 1 + 1e-9)
+  return Math.max(1, Math.floor(baseCpp * rebirthMultiplier.value + 1e-9))
 }
 
 const getUpgradeCost = (level) => {
@@ -68,7 +70,20 @@ const nextUpgradeGain = computed(() => getUpgradeGain(upgradeLevel.value))
 const nextUpgradeCost = computed(() => getUpgradeCost(upgradeLevel.value))
 const canAffordUpgrade = computed(() => chickenCount.value >= nextUpgradeCost.value)
 const autoPopupClickUpgradeCost = 1000
+const chickenBreastUnlockCost = 200
+const getPopupSpeedUpgradeCost = (level) => {
+  const baseLevel = (level + 1) * 5
+  return getUpgradeCost(baseLevel)
+}
 const rebirthMultiplier = computed(() => 1 + 0.1 * rebirthCount.value)
+const canAffordChickenBreastUnlock = computed(() => {
+  return !hasChickenBreastUnlock.value && chickenCount.value >= chickenBreastUnlockCost
+})
+const nextPopupSpeedCost = computed(() => getPopupSpeedUpgradeCost(popupSpeedUpgradeLevel.value))
+const canAffordPopupSpeedUpgrade = computed(() => chickenCount.value >= nextPopupSpeedCost.value)
+const currentPopupIntervalMs = computed(() => {
+  return Math.max(1000, 5000 - popupSpeedUpgradeLevel.value * 50)
+})
 const getRebirthLevelRequirement = () => {
   return 45 + rebirthCount.value * 10
 }
@@ -167,9 +182,11 @@ const createChicken = () => {
   const maxX = Math.max(0, viewportWidth.value - size)
   const maxY = Math.max(0, viewportHeight.value - size)
 
+  const validImages = hasChickenBreastUnlock.value ? chickenImages : chickenImages.filter(img => !img.includes('/Full/'))
+
   return {
     id: ++chickenIdSeed,
-    src: chickenImages[Math.floor(Math.random() * chickenImages.length)],
+    src: validImages[Math.floor(Math.random() * validImages.length)],
     size,
     x: randomBetween(0, maxX),
     y: randomBetween(0, maxY),
@@ -231,11 +248,11 @@ const upgradeChickenSpawn = () => {
   }
 
   const upgradeCost = nextUpgradeCost.value
-  const upgradeGain = nextUpgradeGain.value
+  const newCpp = nextUpgradeGain.value
 
   totalChickenCount.value -= upgradeCost
   syncRenderedChickens()
-  chickensPerPopup.value += upgradeGain
+  chickensPerPopup.value = newCpp
   upgradeLevel.value += 1
 }
 
@@ -257,7 +274,27 @@ const rebirth = () => {
   rebirthCount.value += 1
   totalChickenCount.value = 0
   chickensPerPopup.value = 1
-  upgradeLevel.value = 0
+  upgradeLevel.value = 1
+  syncRenderedChickens()
+}
+
+const unlockChickenBreast = () => {
+  if (!canAffordChickenBreastUnlock.value) {
+    return
+  }
+
+  totalChickenCount.value -= chickenBreastUnlockCost
+  hasChickenBreastUnlock.value = true
+  syncRenderedChickens()
+}
+
+const upgradePopupSpeed = () => {
+  if (!canAffordPopupSpeedUpgrade.value) {
+    return
+  }
+
+  totalChickenCount.value -= nextPopupSpeedCost.value
+  popupSpeedUpgradeLevel.value += 1
   syncRenderedChickens()
 }
 
@@ -283,9 +320,10 @@ const createSavePayload = () => {
     upgradeLevel: upgradeLevel.value,
     hasAutoPopupClickUpgrade: hasAutoPopupClickUpgrade.value,
     isAutoClickerEnabled: isAutoClickerEnabled.value,
-      rebirthCount: rebirthCount.value,
+    rebirthCount: rebirthCount.value,
+    hasChickenBreastUnlock: hasChickenBreastUnlock.value,
+    popupSpeedUpgradeLevel: popupSpeedUpgradeLevel.value,
     chickenCap: chickenCap.value,
-    isUnlimitedCap: isUnlimitedCap.value,
     areCollisionsEnabled: areCollisionsEnabled.value,
     isPerformanceMode: isPerformanceMode.value,
   }
@@ -386,7 +424,7 @@ const confirmAndDeleteSave = () => {
 
 const applySavedProgress = (savedState) => {
   const savedPopupCount = normalizePositiveInteger(savedState.chickensPerPopup, 1)
-  const resolvedUpgradeLevel = normalizePositiveInteger(savedState.upgradeLevel, 0, 0)
+  const resolvedUpgradeLevel = normalizePositiveInteger(savedState.upgradeLevel, 1, 1)
 
   totalChickenCount.value = normalizePositiveInteger(savedState.totalChickenCount, 0, 0)
   chickensPerPopup.value = savedPopupCount
@@ -394,8 +432,9 @@ const applySavedProgress = (savedState) => {
   hasAutoPopupClickUpgrade.value = Boolean(savedState.hasAutoPopupClickUpgrade)
   isAutoClickerEnabled.value = savedState.isAutoClickerEnabled !== false
   rebirthCount.value = normalizePositiveInteger(savedState.rebirthCount, 0, 0)
+  hasChickenBreastUnlock.value = Boolean(savedState.hasChickenBreastUnlock)
+  popupSpeedUpgradeLevel.value = normalizePositiveInteger(savedState.popupSpeedUpgradeLevel, 0, 0)
   chickenCap.value = normalizeCapValue(savedState.chickenCap)
-  isUnlimitedCap.value = Boolean(savedState.isUnlimitedCap)
   areCollisionsEnabled.value = savedState.areCollisionsEnabled !== false
   isPerformanceMode.value = Boolean(savedState.isPerformanceMode)
 
@@ -730,9 +769,7 @@ onMounted(() => {
     autosaveStatus.value = 'Autosave: Paused'
   }
 
-  popupTimerId = window.setTimeout(spawnPopup, popupIntervalMs)
-
-  window.addEventListener('resize', updateViewport)
+  popupTimerId = window.setTimeout(spawnPopup, currentPopupIntervalMs.value)
   window.addEventListener('pointermove', handlePointerMove)
   window.addEventListener('pointerup', handlePointerUp)
   window.addEventListener('pointercancel', handlePointerUp)
@@ -766,9 +803,10 @@ watch(
     upgradeLevel,
     hasAutoPopupClickUpgrade,
     isAutoClickerEnabled,
-      rebirthCount,
+    rebirthCount,
+    hasChickenBreastUnlock,
+    popupSpeedUpgradeLevel,
     chickenCap,
-    isUnlimitedCap,
     areCollisionsEnabled,
     isPerformanceMode,
   ],
@@ -802,7 +840,7 @@ watch(totalChickenCount, () => {
         :disabled="!canAffordUpgrade"
         @click="upgradeChickenSpawn"
       >
-        +{{ nextUpgradeGain }} chicken per popup (now {{ chickensPerPopup }}) — Cost: {{ nextUpgradeCost }}
+        {{ nextUpgradeGain }} chicken per popup — Cost: {{ nextUpgradeCost }}
       </button>
 
       <button
@@ -827,6 +865,24 @@ watch(totalChickenCount, () => {
         </button>
       </div>
 
+      <button
+        type="button"
+        class="upgrade-button"
+        :disabled="!canAffordChickenBreastUnlock"
+        @click="unlockChickenBreast"
+      >
+        Unlock Chicken Breasts — Cost: {{ chickenBreastUnlockCost }}
+      </button>
+
+      <button
+        type="button"
+        class="upgrade-button"
+        :disabled="!canAffordPopupSpeedUpgrade"
+        @click="upgradePopupSpeed"
+      >
+        Faster Popups ({{ (currentPopupIntervalMs / 1000).toFixed(2) }}s) — Cost: {{ nextPopupSpeedCost }}
+      </button>
+
       <label class="menu-label" for="chicken-cap-input">Rendered chicken cap</label>
       <input
         id="chicken-cap-input"
@@ -836,7 +892,6 @@ watch(totalChickenCount, () => {
         min="25"
         max="2000"
         step="5"
-        :disabled="isUnlimitedCap"
         @change="applyChickenCap"
       >
 
