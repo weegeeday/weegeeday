@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import popupImage from './assets/BCA.svg'
 import soundFile from './assets/sound.mp3'
 import sound2File from './assets/sound2.mp3'
@@ -22,7 +22,10 @@ const chickensPerPopup = ref(1)
 const upgradeCost = ref(2)
 const chickenCap = ref(300)
 const isUnlimitedCap = ref(false)
+const useRenderLimit = ref(false)
+const renderLimit = ref(120)
 const fpsCounter = ref(0)
+const totalChickenCount = ref(0)
 
 let popupTimerId = null
 let animationFrameId = null
@@ -39,8 +42,15 @@ const chickenImages = [chickenImage1, chickenImage2]
 popupAudio.preload = 'auto'
 chickenAudio.preload = 'auto'
 
-const chickenCount = computed(() => chickens.value.length)
+const chickenCount = computed(() => totalChickenCount.value)
 const canAffordUpgrade = computed(() => chickenCount.value >= upgradeCost.value)
+const effectiveRenderLimit = computed(() => {
+  if (!useRenderLimit.value) {
+    return totalChickenCount.value
+  }
+
+  return Math.min(totalChickenCount.value, normalizeRenderLimit(renderLimit.value))
+})
 
 const randomBetween = (minimum, maximum) => {
   return minimum + Math.random() * (maximum - minimum)
@@ -64,13 +74,18 @@ const normalizeCapValue = (value) => {
   return Math.max(25, Math.min(2000, Math.round(safeValue)))
 }
 
+const normalizeRenderLimit = (value) => {
+  const safeValue = Number.isFinite(value) ? value : 120
+  return Math.max(10, Math.min(1000, Math.round(safeValue)))
+}
+
 const enforceChickenCap = () => {
   if (isUnlimitedCap.value) {
     return
   }
 
-  while (chickens.value.length > chickenCap.value) {
-    chickens.value.shift()
+  if (totalChickenCount.value > chickenCap.value) {
+    totalChickenCount.value = chickenCap.value
   }
 }
 
@@ -79,19 +94,6 @@ const clampPosition = (chicken) => {
   const maxY = Math.max(0, viewportHeight.value - chicken.size)
   chicken.x = Math.max(0, Math.min(chicken.x, maxX))
   chicken.y = Math.max(0, Math.min(chicken.y, maxY))
-}
-
-const prewarmPopupAudio = async () => {
-  try {
-    popupAudio.muted = true
-    popupAudio.currentTime = 0
-    await popupAudio.play()
-    popupAudio.pause()
-    popupAudio.currentTime = 0
-    popupAudio.muted = false
-  } catch (error) {
-    void error
-  }
 }
 
 const playPopupAudio = async () => {
@@ -127,16 +129,12 @@ const spawnPopup = () => {
   void playPopupAudio()
 }
 
-const addChicken = () => {
-  if (!isUnlimitedCap.value && chickens.value.length >= chickenCap.value) {
-    chickens.value.shift()
-  }
-
+const createChicken = () => {
   const size = getChickenSize()
   const maxX = Math.max(0, viewportWidth.value - size)
   const maxY = Math.max(0, viewportHeight.value - size)
 
-  chickens.value.push({
+  return {
     id: ++chickenIdSeed,
     src: chickenImages[Math.floor(Math.random() * chickenImages.length)],
     size,
@@ -156,14 +154,33 @@ const addChicken = () => {
     angularVelocity: randomBetween(-180, 180),
     movedWhileDragging: false,
     isDragging: false,
-  })
+  }
+}
+
+const syncRenderedChickens = () => {
+  const targetCount = effectiveRenderLimit.value
+
+  while (chickens.value.length > targetCount) {
+    chickens.value.shift()
+  }
+
+  while (chickens.value.length < targetCount) {
+    chickens.value.push(createChicken())
+  }
 }
 
 const handlePopupClick = () => {
   void playChickenAudio()
 
-  for (let spawnIndex = 0; spawnIndex < chickensPerPopup.value; spawnIndex += 1) {
-    addChicken()
+  const requested = chickensPerPopup.value
+  const allowedByCap = isUnlimitedCap.value
+    ? requested
+    : Math.max(0, chickenCap.value - totalChickenCount.value)
+  const toAdd = Math.min(requested, allowedByCap)
+
+  if (toAdd > 0) {
+    totalChickenCount.value += toAdd
+    syncRenderedChickens()
   }
 
   isPopupVisible.value = false
@@ -184,7 +201,8 @@ const upgradeChickenSpawn = () => {
     return
   }
 
-  chickens.value.splice(0, upgradeCost.value)
+  totalChickenCount.value -= upgradeCost.value
+  syncRenderedChickens()
   chickensPerPopup.value *= 2
   upgradeCost.value = Math.max(1, Math.ceil(upgradeCost.value * 1.3))
 }
@@ -192,12 +210,18 @@ const upgradeChickenSpawn = () => {
 const applyChickenCap = () => {
   chickenCap.value = normalizeCapValue(chickenCap.value)
   enforceChickenCap()
+  syncRenderedChickens()
 }
 
 const toggleUnlimitedCap = () => {
   if (!isUnlimitedCap.value) {
     applyChickenCap()
   }
+}
+
+const applyRenderLimit = () => {
+  renderLimit.value = normalizeRenderLimit(renderLimit.value)
+  syncRenderedChickens()
 }
 
 const findChickenById = (id) => {
@@ -475,9 +499,8 @@ const animateChickens = (timestamp) => {
 
 onMounted(() => {
   document.title = 'Barbaque Chicken Alert'
-
-  void prewarmPopupAudio()
   updateViewport()
+  syncRenderedChickens()
 
   popupTimerId = window.setTimeout(spawnPopup, popupIntervalMs)
 
@@ -506,6 +529,10 @@ onUnmounted(() => {
   popupAudio.currentTime = 0
   chickenAudio.pause()
   chickenAudio.currentTime = 0
+})
+
+watch(useRenderLimit, () => {
+  syncRenderedChickens()
 })
 </script>
 
@@ -550,6 +577,24 @@ onUnmounted(() => {
         >
         Unlimited cap
       </label>
+
+      <label class="menu-toggle">
+        <input v-model="useRenderLimit" type="checkbox">
+        Limit rendered chickens
+      </label>
+
+      <label class="menu-label" for="render-limit-input">Rendered chicken limit</label>
+      <input
+        id="render-limit-input"
+        v-model.number="renderLimit"
+        class="menu-input"
+        type="number"
+        min="10"
+        max="1000"
+        step="5"
+        :disabled="!useRenderLimit"
+        @change="applyRenderLimit"
+      >
     </div>
 
     <div v-if="isPerformanceMode" class="performance-notice">
