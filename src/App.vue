@@ -3,12 +3,18 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import popupImage from './assets/BCA.svg'
 import soundFile from './assets/sound.mp3'
 import sound2File from './assets/sound2.mp3'
-import chickenImage1 from './assets/chicken/Layer 1.png'
-import chickenImage2 from './assets/chicken/Layer 2.png'
+
+const chickenImageModules = import.meta.glob('./assets/chicken/*.{png,jpg,jpeg,webp,avif,gif}', {
+  eager: true,
+  import: 'default',
+})
 
 const popupIntervalMs = 5000
 const linearFrictionPerSecond = 0.08
 const angularFrictionPerSecond = 0.55
+const saveStorageKey = 'barbequeChickenAlert.save.v1'
+const repoUrl = 'https://github.com/weegeeday/weegeeday'
+const bugReportUrl = `${repoUrl}/issues/new`
 
 const isPopupVisible = ref(false)
 const popupCycleKey = ref(0)
@@ -19,13 +25,19 @@ const areCollisionsEnabled = ref(true)
 const isPerformanceMode = ref(false)
 const isMenuOpen = ref(false)
 const chickensPerPopup = ref(1)
-const upgradeCost = ref(2)
+const upgradeLevel = ref(0)
+const hasAutoPopupClickUpgrade = ref(false)
+const isAutoClickerEnabled = ref(true)
+const rebirthCount = ref(0)
 const chickenCap = ref(300)
 const isUnlimitedCap = ref(false)
-const useRenderLimit = ref(false)
-const renderLimit = ref(120)
 const fpsCounter = ref(0)
 const totalChickenCount = ref(0)
+const showSavePrompt = ref(false)
+const sessionSavingEnabled = ref(true)
+const autosaveStatus = ref('Autosave: On')
+const pendingSavedState = ref(null)
+const saveImportInput = ref(null)
 
 let popupTimerId = null
 let animationFrameId = null
@@ -37,19 +49,40 @@ let smoothedFps = 60
 
 const popupAudio = new Audio(soundFile)
 const chickenAudio = new Audio(sound2File)
-const chickenImages = [chickenImage1, chickenImage2]
+const chickenImages = Object.values(chickenImageModules)
 
 popupAudio.preload = 'auto'
 chickenAudio.preload = 'auto'
 
+const getUpgradeGain = (level) => {
+  const baseGain = Math.max(1, Math.floor((level ** 2.5) / 3 + 1 + 1e-9))
+  return Math.max(1, Math.floor(baseGain * rebirthMultiplier.value + 1e-9))
+}
+
+const getUpgradeCost = (level) => {
+  return Math.max(1, Math.floor(1.5 * (level ** 3) + 1 + 1e-9))
+}
+
 const chickenCount = computed(() => totalChickenCount.value)
-const canAffordUpgrade = computed(() => chickenCount.value >= upgradeCost.value)
+const nextUpgradeGain = computed(() => getUpgradeGain(upgradeLevel.value))
+const nextUpgradeCost = computed(() => getUpgradeCost(upgradeLevel.value))
+const canAffordUpgrade = computed(() => chickenCount.value >= nextUpgradeCost.value)
+const autoPopupClickUpgradeCost = 1000
+const rebirthMultiplier = computed(() => 1 + 0.1 * rebirthCount.value)
+const getRebirthLevelRequirement = () => {
+  return 45 + rebirthCount.value * 10
+}
+const nextRebirthLevelRequirement = computed(() => getRebirthLevelRequirement())
+const canAffordRebirth = computed(() => upgradeLevel.value >= nextRebirthLevelRequirement.value)
+const canAffordAutoPopupClickUpgrade = computed(() => {
+  return !hasAutoPopupClickUpgrade.value && chickenCount.value >= autoPopupClickUpgradeCost
+})
 const effectiveRenderLimit = computed(() => {
-  if (!useRenderLimit.value) {
+  if (isUnlimitedCap.value) {
     return totalChickenCount.value
   }
 
-  return Math.min(totalChickenCount.value, normalizeRenderLimit(renderLimit.value))
+  return Math.min(totalChickenCount.value, normalizeCapValue(chickenCap.value))
 })
 
 const randomBetween = (minimum, maximum) => {
@@ -74,19 +107,13 @@ const normalizeCapValue = (value) => {
   return Math.max(25, Math.min(2000, Math.round(safeValue)))
 }
 
-const normalizeRenderLimit = (value) => {
-  const safeValue = Number.isFinite(value) ? value : 120
-  return Math.max(10, Math.min(1000, Math.round(safeValue)))
+const normalizePositiveInteger = (value, fallback = 1, minimum = 1, maximum = 1000000) => {
+  const safeValue = Number.isFinite(value) ? value : fallback
+  return Math.max(minimum, Math.min(maximum, Math.round(safeValue)))
 }
 
 const enforceChickenCap = () => {
-  if (isUnlimitedCap.value) {
-    return
-  }
-
-  if (totalChickenCount.value > chickenCap.value) {
-    totalChickenCount.value = chickenCap.value
-  }
+  chickenCap.value = normalizeCapValue(chickenCap.value)
 }
 
 const clampPosition = (chicken) => {
@@ -127,6 +154,12 @@ const spawnPopup = () => {
   isPopupVisible.value = true
   popupCycleKey.value += 1
   void playPopupAudio()
+
+  if (hasAutoPopupClickUpgrade.value && isAutoClickerEnabled.value) {
+    window.setTimeout(() => {
+      handlePopupClick()
+    }, 0)
+  }
 }
 
 const createChicken = () => {
@@ -173,13 +206,9 @@ const handlePopupClick = () => {
   void playChickenAudio()
 
   const requested = chickensPerPopup.value
-  const allowedByCap = isUnlimitedCap.value
-    ? requested
-    : Math.max(0, chickenCap.value - totalChickenCount.value)
-  const toAdd = Math.min(requested, allowedByCap)
 
-  if (toAdd > 0) {
-    totalChickenCount.value += toAdd
+  if (requested > 0) {
+    totalChickenCount.value += requested
     syncRenderedChickens()
   }
 
@@ -201,10 +230,35 @@ const upgradeChickenSpawn = () => {
     return
   }
 
-  totalChickenCount.value -= upgradeCost.value
+  const upgradeCost = nextUpgradeCost.value
+  const upgradeGain = nextUpgradeGain.value
+
+  totalChickenCount.value -= upgradeCost
   syncRenderedChickens()
-  chickensPerPopup.value *= 2
-  upgradeCost.value = Math.max(1, Math.ceil(upgradeCost.value * 1.3))
+  chickensPerPopup.value += upgradeGain
+  upgradeLevel.value += 1
+}
+
+const upgradeAutoPopupClick = () => {
+  if (!canAffordAutoPopupClickUpgrade.value) {
+    return
+  }
+
+  totalChickenCount.value -= autoPopupClickUpgradeCost
+  hasAutoPopupClickUpgrade.value = true
+  syncRenderedChickens()
+}
+
+const rebirth = () => {
+  if (!canAffordRebirth.value) {
+    return
+  }
+
+  rebirthCount.value += 1
+  totalChickenCount.value = 0
+  chickensPerPopup.value = 1
+  upgradeLevel.value = 0
+  syncRenderedChickens()
 }
 
 const applyChickenCap = () => {
@@ -219,9 +273,165 @@ const toggleUnlimitedCap = () => {
   }
 }
 
-const applyRenderLimit = () => {
-  renderLimit.value = normalizeRenderLimit(renderLimit.value)
+const createSavePayload = () => {
+  return {
+    version: 1,
+    upgradePricingVersion: 1,
+    savedAt: Date.now(),
+    totalChickenCount: totalChickenCount.value,
+    chickensPerPopup: chickensPerPopup.value,
+    upgradeLevel: upgradeLevel.value,
+    hasAutoPopupClickUpgrade: hasAutoPopupClickUpgrade.value,
+    isAutoClickerEnabled: isAutoClickerEnabled.value,
+      rebirthCount: rebirthCount.value,
+    chickenCap: chickenCap.value,
+    isUnlimitedCap: isUnlimitedCap.value,
+    areCollisionsEnabled: areCollisionsEnabled.value,
+    isPerformanceMode: isPerformanceMode.value,
+  }
+}
+
+const writeAutosave = () => {
+  if (!sessionSavingEnabled.value) {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(saveStorageKey, JSON.stringify(createSavePayload()))
+    autosaveStatus.value = 'Autosave: On'
+  } catch {
+    autosaveStatus.value = 'Autosave: Failed'
+  }
+}
+
+const removeSavedProgress = () => {
+  try {
+    window.localStorage.removeItem(saveStorageKey)
+  } catch (error) {
+    void error
+  }
+}
+
+const confirmDeleteSave = () => {
+  return window.confirm('Delete saved progress from this device?')
+}
+
+const openRepository = () => {
+  window.open(repoUrl, '_blank', 'noopener,noreferrer')
+}
+
+const reportBug = () => {
+  window.open(bugReportUrl, '_blank', 'noopener,noreferrer')
+}
+
+const exportSaveFile = () => {
+  const serializedSave = JSON.stringify(createSavePayload(), null, 2)
+  const blob = new Blob([serializedSave], { type: 'application/json' })
+  const objectUrl = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  const timestamp = new Date().toISOString().replace(/[.:]/g, '-').slice(0, 19)
+
+  anchor.href = objectUrl
+  anchor.download = `barbeque-chicken-save-${timestamp}.json`
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  URL.revokeObjectURL(objectUrl)
+}
+
+const triggerSaveImport = () => {
+  saveImportInput.value?.click()
+}
+
+const handleSaveImportSelection = async (event) => {
+  const file = event.target.files?.[0]
+
+  if (event.target) {
+    event.target.value = ''
+  }
+
+  if (!file) {
+    return
+  }
+
+  if (!window.confirm('Importing a save will overwrite your current progress. Continue?')) {
+    return
+  }
+
+  try {
+    const fileText = await file.text()
+    const parsedSave = JSON.parse(fileText)
+
+    if (!parsedSave || typeof parsedSave !== 'object') {
+      throw new Error('Imported file does not contain a valid save object.')
+    }
+
+    applySavedProgress(parsedSave)
+    sessionSavingEnabled.value = true
+    autosaveStatus.value = 'Autosave: On'
+    writeAutosave()
+  } catch (error) {
+    window.alert(`Could not import save: ${error instanceof Error ? error.message : 'Unknown error'}`)
+  }
+}
+
+const confirmAndDeleteSave = () => {
+  if (!confirmDeleteSave()) {
+    return
+  }
+
+  removeSavedProgress()
+  autosaveStatus.value = sessionSavingEnabled.value ? 'Autosave: On' : 'Autosave: Off (session)'
+}
+
+const applySavedProgress = (savedState) => {
+  const savedPopupCount = normalizePositiveInteger(savedState.chickensPerPopup, 1)
+  const resolvedUpgradeLevel = normalizePositiveInteger(savedState.upgradeLevel, 0, 0)
+
+  totalChickenCount.value = normalizePositiveInteger(savedState.totalChickenCount, 0, 0)
+  chickensPerPopup.value = savedPopupCount
+  upgradeLevel.value = resolvedUpgradeLevel
+  hasAutoPopupClickUpgrade.value = Boolean(savedState.hasAutoPopupClickUpgrade)
+  isAutoClickerEnabled.value = savedState.isAutoClickerEnabled !== false
+  rebirthCount.value = normalizePositiveInteger(savedState.rebirthCount, 0, 0)
+  chickenCap.value = normalizeCapValue(savedState.chickenCap)
+  isUnlimitedCap.value = Boolean(savedState.isUnlimitedCap)
+  areCollisionsEnabled.value = savedState.areCollisionsEnabled !== false
+  isPerformanceMode.value = Boolean(savedState.isPerformanceMode)
+
+  enforceChickenCap()
   syncRenderedChickens()
+}
+
+const handleLoadSavedProgress = () => {
+  if (pendingSavedState.value) {
+    applySavedProgress(pendingSavedState.value)
+  }
+
+  sessionSavingEnabled.value = true
+  autosaveStatus.value = 'Autosave: On'
+  showSavePrompt.value = false
+  pendingSavedState.value = null
+  writeAutosave()
+}
+
+const handleDeleteSavedProgress = () => {
+  if (!confirmDeleteSave()) {
+    return
+  }
+
+  removeSavedProgress()
+  sessionSavingEnabled.value = true
+  autosaveStatus.value = 'Autosave: On'
+  showSavePrompt.value = false
+  pendingSavedState.value = null
+}
+
+const handleKeepWithoutLoad = () => {
+  sessionSavingEnabled.value = false
+  autosaveStatus.value = 'Autosave: Off (session)'
+  showSavePrompt.value = false
+  pendingSavedState.value = null
 }
 
 const findChickenById = (id) => {
@@ -498,9 +708,27 @@ const animateChickens = (timestamp) => {
 }
 
 onMounted(() => {
-  document.title = 'Barbaque Chicken Alert'
+  document.title = 'Barbeque Chicken Alert'
   updateViewport()
   syncRenderedChickens()
+
+  try {
+    const serializedSave = window.localStorage.getItem(saveStorageKey)
+    if (serializedSave) {
+      const parsedSave = JSON.parse(serializedSave)
+      if (parsedSave && typeof parsedSave === 'object') {
+        pendingSavedState.value = parsedSave
+        showSavePrompt.value = true
+      }
+    }
+  } catch {
+    pendingSavedState.value = null
+  }
+
+  if (showSavePrompt.value) {
+    sessionSavingEnabled.value = false
+    autosaveStatus.value = 'Autosave: Paused'
+  }
 
   popupTimerId = window.setTimeout(spawnPopup, popupIntervalMs)
 
@@ -531,7 +759,25 @@ onUnmounted(() => {
   chickenAudio.currentTime = 0
 })
 
-watch(useRenderLimit, () => {
+watch(
+  [
+    totalChickenCount,
+    chickensPerPopup,
+    upgradeLevel,
+    hasAutoPopupClickUpgrade,
+    isAutoClickerEnabled,
+      rebirthCount,
+    chickenCap,
+    isUnlimitedCap,
+    areCollisionsEnabled,
+    isPerformanceMode,
+  ],
+  () => {
+    writeAutosave()
+  },
+)
+
+watch(totalChickenCount, () => {
   syncRenderedChickens()
 })
 </script>
@@ -545,18 +791,43 @@ watch(useRenderLimit, () => {
       <div class="counter">Chicken: {{ chickenCount }}</div>
     </div>
 
+    <div class="save-status">{{ autosaveStatus }}</div>
+
     <div v-if="isMenuOpen" class="menu-panel">
       <div class="menu-title">Upgrades</div>
+      <div class="menu-label">Current level: {{ upgradeLevel }}</div>
       <button
         type="button"
         class="upgrade-button"
         :disabled="!canAffordUpgrade"
         @click="upgradeChickenSpawn"
       >
-        Double chickens per popup (x{{ chickensPerPopup }}) — Cost: {{ upgradeCost }}
+        +{{ nextUpgradeGain }} chicken per popup (now {{ chickensPerPopup }}) — Cost: {{ nextUpgradeCost }}
       </button>
 
-      <label class="menu-label" for="chicken-cap-input">Chicken cap</label>
+      <button
+        type="button"
+        class="upgrade-button"
+        :disabled="!canAffordAutoPopupClickUpgrade"
+        @click="upgradeAutoPopupClick"
+      >
+        Auto-click popup — Cost: {{ autoPopupClickUpgradeCost }}
+      </button>
+
+      <div class="rebirth-panel">
+        <div class="menu-title">Rebirth</div>
+        <div class="menu-label">Multiplier: ×{{ rebirthMultiplier.toFixed(1) }} | Rebirths: {{ rebirthCount }}</div>
+        <button
+          type="button"
+          class="upgrade-button rebirth-button"
+          :disabled="!canAffordRebirth"
+          @click="rebirth"
+        >
+          Rebirth at Level {{ nextRebirthLevelRequirement }} (+0.1× gain)
+        </button>
+      </div>
+
+      <label class="menu-label" for="chicken-cap-input">Rendered chicken cap</label>
       <input
         id="chicken-cap-input"
         v-model.number="chickenCap"
@@ -578,28 +849,58 @@ watch(useRenderLimit, () => {
         Unlimited cap
       </label>
 
-      <label class="menu-toggle">
-        <input v-model="useRenderLimit" type="checkbox">
-        Limit rendered chickens
-      </label>
+      <div class="menu-actions">
+        <button type="button" class="menu-action-button" @click="reportBug">Report bug</button>
+        <button type="button" class="menu-action-button" @click="exportSaveFile">Export save</button>
+        <button type="button" class="menu-action-button" @click="triggerSaveImport">Import save</button>
+        <button type="button" class="menu-action-button danger" @click="confirmAndDeleteSave">
+          Delete save
+        </button>
+      </div>
 
-      <label class="menu-label" for="render-limit-input">Rendered chicken limit</label>
-      <input
-        id="render-limit-input"
-        v-model.number="renderLimit"
-        class="menu-input"
-        type="number"
-        min="10"
-        max="1000"
-        step="5"
-        :disabled="!useRenderLimit"
-        @change="applyRenderLimit"
-      >
+      <button type="button" class="repo-link" @click="openRepository" aria-label="Open GitHub repository">
+        <svg viewBox="0 0 24 24" class="repo-icon" aria-hidden="true">
+          <path
+            d="M12 2C6.48 2 2 6.59 2 12.25c0 4.52 2.87 8.35 6.84 9.7.5.09.66-.22.66-.49 0-.24-.01-.88-.01-1.73-2.78.62-3.37-1.38-3.37-1.38-.45-1.18-1.11-1.49-1.11-1.49-.9-.64.07-.63.07-.63 1 .07 1.52 1.05 1.52 1.05.88 1.55 2.31 1.1 2.87.84.09-.66.35-1.1.64-1.36-2.22-.26-4.56-1.14-4.56-5.08 0-1.12.39-2.04 1.03-2.76-.1-.26-.45-1.3.1-2.72 0 0 .84-.28 2.75 1.06A9.33 9.33 0 0 1 12 6.98c.85 0 1.7.12 2.5.35 1.9-1.34 2.74-1.06 2.74-1.06.56 1.42.21 2.46.1 2.72.64.72 1.03 1.64 1.03 2.76 0 3.95-2.34 4.81-4.58 5.07.36.32.68.93.68 1.88 0 1.36-.01 2.46-.01 2.79 0 .27.16.59.67.49A10.26 10.26 0 0 0 22 12.25C22 6.59 17.52 2 12 2Z"
+          />
+        </svg>
+        Repository
+      </button>
     </div>
 
     <div v-if="isPerformanceMode" class="performance-notice">
       Collision physics disabled for performance.
     </div>
+
+    <div v-if="showSavePrompt" class="save-overlay">
+      <div class="save-dialog">
+        <div class="save-title">Saved progress found</div>
+        <div class="save-text">Choose how to start this session:</div>
+        <button type="button" class="save-button" @click="handleLoadSavedProgress">Load save</button>
+        <button type="button" class="save-button" @click="handleDeleteSavedProgress">Delete save</button>
+        <button type="button" class="save-button" @click="handleKeepWithoutLoad">
+          Keep save, do not load (disable saving this session)
+        </button>
+      </div>
+    </div>
+
+    <div v-if="hasAutoPopupClickUpgrade" class="auto-clicker-toggle">
+      <label class="toggle-label">
+        <input
+          v-model="isAutoClickerEnabled"
+          type="checkbox"
+        >
+        <span>Auto-click</span>
+      </label>
+    </div>
+
+    <input
+      ref="saveImportInput"
+      type="file"
+      accept="application/json,.json"
+      class="save-import-input"
+      @change="handleSaveImportSelection"
+    >
 
     <img
       v-for="chicken in chickens"
@@ -717,6 +1018,52 @@ watch(useRenderLimit, () => {
   font-size: 0.8rem;
 }
 
+.menu-actions {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.save-import-input {
+  display: none;
+}
+
+.menu-action-button {
+  border: 1px solid #474747;
+  background: rgba(32, 32, 32, 0.95);
+  color: #f4f4f4;
+  border-radius: 0.6rem;
+  padding: 0.48rem 0.58rem;
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-action-button.danger {
+  border-color: #6a2a2a;
+  color: #ffc7c7;
+}
+
+.repo-link {
+  margin-top: 0.25rem;
+  border: 1px solid #3a3a3a;
+  background: rgba(19, 19, 19, 0.96);
+  color: #efefef;
+  border-radius: 0.7rem;
+  padding: 0.48rem 0.58rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  cursor: pointer;
+  width: 100%;
+}
+
+.repo-icon {
+  width: 1rem;
+  height: 1rem;
+  fill: currentColor;
+}
+
 .upgrade-button {
   border: 1px solid #4a4a4a;
   background: rgba(32, 32, 32, 0.95);
@@ -733,6 +1080,21 @@ watch(useRenderLimit, () => {
   cursor: not-allowed;
 }
 
+.rebirth-button {
+  border-color: #5a4a3a;
+  background: rgba(50, 40, 25, 0.95);
+  color: #ffdbac;
+}
+
+.rebirth-panel {
+  border: 1px solid #2f2418;
+  background: rgba(17, 14, 10, 0.92);
+  border-radius: 0.8rem;
+  padding: 0.7rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
 .performance-notice {
   position: fixed;
   top: 3.75rem;
@@ -746,6 +1108,60 @@ watch(useRenderLimit, () => {
   font-size: 0.78rem;
 }
 
+.save-status {
+  position: fixed;
+  top: 3.75rem;
+  left: 1rem;
+  z-index: 50;
+  border: 1px solid #2c2c2c;
+  background: rgba(15, 15, 15, 0.92);
+  color: #cfcfcf;
+  border-radius: 0.6rem;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.74rem;
+}
+
+.save-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.66);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.save-dialog {
+  width: min(430px, 95vw);
+  border: 1px solid #2f2f2f;
+  border-radius: 1rem;
+  background: rgba(15, 15, 15, 0.98);
+  padding: 1rem;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.save-title {
+  color: #f1f1f1;
+  font-size: 0.95rem;
+}
+
+.save-text {
+  color: #cfcfcf;
+  font-size: 0.8rem;
+}
+
+.save-button {
+  border: 1px solid #4a4a4a;
+  background: rgba(32, 32, 32, 0.95);
+  color: #f7f7f7;
+  border-radius: 0.7rem;
+  padding: 0.55rem 0.65rem;
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+
 .chicken {
   position: fixed;
   z-index: 20;
@@ -757,6 +1173,31 @@ watch(useRenderLimit, () => {
 
 .chicken:active {
   cursor: grabbing;
+}
+
+.auto-clicker-toggle {
+  position: fixed;
+  bottom: 1rem;
+  right: 1rem;
+  z-index: 50;
+  border: 1px solid #2c2c2c;
+  background: rgba(15, 15, 15, 0.92);
+  border-radius: 0.6rem;
+  padding: 0.45rem 0.65rem;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #d8d8d8;
+  font-size: 0.8rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle-label input {
+  cursor: pointer;
 }
 
 .popup-image {
@@ -799,6 +1240,16 @@ watch(useRenderLimit, () => {
     top: 3.4rem;
     right: 0.75rem;
     max-width: 70vw;
+  }
+
+  .save-status {
+    top: 3.4rem;
+    left: 0.75rem;
+  }
+
+  .auto-clicker-toggle {
+    bottom: 0.75rem;
+    right: 0.75rem;
   }
 }
 
